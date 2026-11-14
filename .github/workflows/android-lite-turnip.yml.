@@ -1,3 +1,4 @@
+
 name: Blender Lite Turnip APK
 
 on:
@@ -6,108 +7,200 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: blender-lite-turnip-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build:
-    name: Build Android ARM64 APK
+    name: Build Blender Lite with Mesa Turnip
     runs-on: ubuntu-24.04
     timeout-minutes: 360
 
     env:
       ANDROID_HOME: /home/runner/android-sdk
       ANDROID_NDK_VERSION: 30.0.14904198-beta1
-      ANDROID_API: 31
-      ANDROID_TARGET_API: 34
+      ANDROID_API: "31"
+      ANDROID_TARGET_API: "34"
       ANDROID_ABI: arm64-v8a
+      ANDROID_HOST_CC: clang-18
+      ANDROID_HOST_CXX: clang++-18
+      PIP_BREAK_SYSTEM_PACKAGES: "1"
 
     steps:
-      - name: Checkout repository
+      - name: Checkout Android branch
         uses: actions/checkout@v4
         with:
           ref: ${{ github.ref }}
-          lfs: false
+          lfs: true
           submodules: false
+          fetch-depth: 1
 
-      - name: Install Linux dependencies
+      - name: Install build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            build-essential gcc-14 g++-14 \
-            cmake ninja-build git git-lfs \
-            python3 python3-pip python3-venv \
-            pkg-config curl wget unzip zip \
-            patchelf libtbb-dev libssl-dev \
-            libffi-dev zlib1g-dev libxml2-dev \
-            libpng-dev libjpeg-dev libtiff-dev \
-            libopenexr-dev libboost-all-dev
+            build-essential \
+            clang-18 \
+            cmake \
+            ninja-build \
+            git \
+            git-lfs \
+            python3 \
+            python3-pip \
+            python3-venv \
+            pkg-config \
+            curl \
+            wget \
+            unzip \
+            zip \
+            tar \
+            patch \
+            patchelf \
+            bison \
+            flex \
+            libtbb-dev \
+            libssl-dev \
+            libffi-dev \
+            zlib1g-dev \
+            libxml2-dev \
+            libelf-dev \
+            libdrm-dev \
+            libexpat1-dev \
+            libpng-dev \
+            libjpeg-dev \
+            libtiff-dev \
+            libopenexr-dev \
+            libboost-all-dev
 
-      - name: Configure Java
+      - name: Configure Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: "17"
 
-      - name: Configure Android SDK
+      - name: Configure Android command-line tools
         uses: android-actions/setup-android@v3
 
       - name: Install Android SDK and NDK
+        shell: bash
         run: |
+          set -euo pipefail
+
           mkdir -p "$ANDROID_HOME"
-          yes | sdkmanager --sdk_root="$ANDROID_HOME" --licenses
 
           sdkmanager --sdk_root="$ANDROID_HOME" \
+            --channel=3 \
             "platform-tools" \
             "platforms;android-35" \
             "build-tools;35.0.1" \
             "ndk;30.0.14904198-beta1"
 
+          yes | sdkmanager --sdk_root="$ANDROID_HOME" --licenses
+
+          test -f "$ANDROID_HOME/platforms/android-35/android.jar"
+          test -x "$ANDROID_HOME/build-tools/35.0.1/aapt2"
+          test -x "$ANDROID_HOME/build-tools/35.0.1/apksigner"
           test -f "$ANDROID_HOME/ndk/30.0.14904198-beta1/build/cmake/android.toolchain.cmake"
 
-      - name: Initialize Blender dependencies
+          echo "Android SDK and NDK verified."
+
+      - name: Validate host compiler and build tools
+        shell: bash
         run: |
+          set -euo pipefail
+
+          clang-18 --version
+          clang++-18 --version
+          cmake --version
+          ninja --version
+          java -version
+          python3 --version
+          git lfs version
+
+          python3 - <<'PY'
+          import subprocess
+          version = subprocess.check_output(
+              ["cmake", "--version"], text=True
+          ).split()[2]
+          parts = tuple(map(int, version.split(".")[:2]))
+          assert parts >= (3, 26), f"CMake too old: {version}"
+          print("CMake version accepted:", version)
+          PY
+
+      - name: Initialize required Blender submodules
+        shell: bash
+        run: |
+          set -euo pipefail
+
           git lfs install
           git lfs pull
 
           git -c submodule.lib/linux_x64.update=checkout \
               -c submodule.lib/android_arm64.update=checkout \
-              submodule update --init lib/linux_x64 lib/android_arm64
+              submodule update --init --recursive \
+              lib/linux_x64 lib/android_arm64
 
-          test -d lib/linux_x64/tbb/lib
+          test -d lib/linux_x64
           test -d lib/android_arm64
+          test -d lib/linux_x64/tbb/lib
 
-          git -C lib/linux_x64 lfs pull || true
-          git -C lib/android_arm64 lfs pull || true
+          git -C lib/linux_x64 lfs install
+          git -C lib/linux_x64 lfs pull
 
-      - name: Check build environment
+          git -C lib/android_arm64 lfs install
+          git -C lib/android_arm64 lfs pull
+
+          git submodule status
+
+      - name: Validate Android build environment
+        shell: bash
         run: |
+          set -euo pipefail
+
           source build_files/android/env.sh
-          cmake --version
-          ninja --version
-          gcc-14 --version
-          java -version
-          python3 --version
-          echo "NDK: $ANDROID_NDK_ROOT"
 
-      - name: Build Blender Lite with Turnip
+          test -f "$ANDROID_TOOLCHAIN_FILE"
+          test -x "$ANDROID_LLVM_BIN/clang"
+          test -x "$ANDROID_LLVM_BIN/llvm-readelf"
+          test -x "$ANDROID_LLVM_BIN/llvm-strip"
+
+          echo "Host compiler: $ANDROID_HOST_CC"
+          echo "Host C++ compiler: $ANDROID_HOST_CXX"
+          echo "Android NDK: $ANDROID_NDK_ROOT"
+          echo "Android ABI: $ANDROID_ABI"
+          echo "Android API: $ANDROID_API"
+
+      - name: Build Blender Lite with Mesa Turnip
+        shell: bash
         run: |
+          set -euo pipefail
+
           python3 build_files/android/build.py lite --turnip
 
-      - name: Verify APK
+      - name: Verify generated APK
+        shell: bash
         run: |
-          APK="../blender_build_android/android_apk_stage_lite-turnip/blender-lite-turnip.apk"
+          set -euo pipefail
 
-          if [ ! -f "$APK" ]; then
-            echo "APK not found at expected location."
-            find ../blender_build_android -name "*.apk" -type f
+          APK="$GITHUB_WORKSPACE/../blender_build_android/android_apk_stage_lite-turnip/blender-lite-turnip.apk"
+
+          if [ ! -s "$APK" ]; then
+            echo "::error::Blender Lite Turnip APK was not generated."
+            find "$GITHUB_WORKSPACE/.." -type f -name "*.apk" -print
             exit 1
           fi
 
-          mkdir -p dist
-          cp "$APK" dist/
-          ls -lh dist/
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          cp "$APK" "$GITHUB_WORKSPACE/dist/blender-lite-turnip.apk"
 
-      - name: Upload APK
+          file "$GITHUB_WORKSPACE/dist/blender-lite-turnip.apk"
+          ls -lh "$GITHUB_WORKSPACE/dist/blender-lite-turnip.apk"
+
+      - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: Blender-Mobile-Lite-Turnip
           path: dist/blender-lite-turnip.apk
+          if-no-files-found: error
           retention-days: 14
